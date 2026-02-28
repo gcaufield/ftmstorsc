@@ -6,27 +6,26 @@ use bluer::{
     agent::Agent,
     gatt::local::{
         Application, Characteristic, CharacteristicNotify, CharacteristicNotifyMethod,
-        CharacteristicRead, Service,
+        CharacteristicRead, Profile, Service,
     },
     gatt::remote::Characteristic as RemoteCharacteristic,
 };
+use byteorder::LittleEndian;
 use futures::{FutureExt, StreamExt, pin_mut};
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 use tokio::{
     sync::Mutex,
     time::{sleep, timeout},
 };
 
 /// Service UUID for GATT example.
-const SERVICE_UUID: Uuid = Uuid::from_u128(0x0000181400001000800000805F9B34FB);
+const RSC_SERVICE_UUID: Uuid = Uuid::from_u128(0x0000181400001000800000805F9B34FB);
+const FTM_SERVICE_UUID: Uuid = Uuid::from_u128(0x0000182600001000800000805F9B34FB);
 
 /// Characteristic UUID for GATT example.
-const FEATURE_UUID: Uuid = Uuid::from_u128(0x00002A5400001000800000805F9B34FB);
-const CHARACTERISTIC_UUID: Uuid = Uuid::from_u128(0x00002A5300001000800000805F9B34FB);
-
-/// Manufacturer id for LE advertisement.
-#[allow(dead_code)]
-const MANUFACTURER_ID: u16 = 0xf00d;
+const RSC_FEATURE_UUID: Uuid = Uuid::from_u128(0x00002A5400001000800000805F9B34FB);
+const RSC_MEASUREMENT_UUID: Uuid = Uuid::from_u128(0x00002A5300001000800000805F9B34FB);
+const TREADMILL_DATA_UUID: Uuid = Uuid::from_u128(0x00002ACD00001000800000805F9B34FB);
 
 async fn has_service(device: &Device) -> Result<bool> {
     let addr = device.address();
@@ -35,7 +34,7 @@ async fn has_service(device: &Device) -> Result<bool> {
     let md = device.manufacturer_data().await?;
     println!("    Manufacturer data: {:x?}", &md);
 
-    return Ok(uuids.contains(&SERVICE_UUID));
+    return Ok(uuids.contains(&FTM_SERVICE_UUID));
 }
 async fn connect_device(device: &Device) -> Result<()> {
     if !device.is_connected().await? {
@@ -58,13 +57,13 @@ async fn connect_device(device: &Device) -> Result<()> {
     Ok(())
 }
 
-async fn find_rsc_characteristic(device: &Device) -> Result<Option<RemoteCharacteristic>> {
+async fn find_treadmill_data(device: &Device) -> Result<Option<RemoteCharacteristic>> {
     println!("    Enumerating services...");
     for service in device.services().await? {
         let uuid = service.uuid().await?;
         println!("    Service UUID: {}", &uuid);
         println!("    Service data: {:?}", service.all_properties().await?);
-        if uuid == SERVICE_UUID {
+        if uuid == FTM_SERVICE_UUID {
             println!("    Found our service!");
             for char in service.characteristics().await? {
                 let uuid = char.uuid().await?;
@@ -73,7 +72,7 @@ async fn find_rsc_characteristic(device: &Device) -> Result<Option<RemoteCharact
                     "    Characteristic data: {:?}",
                     char.all_properties().await?
                 );
-                if uuid == CHARACTERISTIC_UUID {
+                if uuid == TREADMILL_DATA_UUID {
                     println!("    Found our characteristic!");
                     return Ok(Some(char));
                 }
@@ -86,18 +85,18 @@ async fn find_rsc_characteristic(device: &Device) -> Result<Option<RemoteCharact
     Ok(None)
 }
 
+fn get_speed(data: &Vec<u8>) -> Option<u32> {
+    if (data[0] & 0x01) == 0 {
+        None
+    } else {
+        Some(data[1] as u32 | ((data[2] as u32) << 8))
+    }
+}
+
 async fn exercise_characteristic(
     char: &RemoteCharacteristic,
     notify_val: Arc<Mutex<Vec<u8>>>,
 ) -> Result<()> {
-    println!("    Characteristic flags: {:?}", char.flags().await?);
-
-    if char.flags().await?.read {
-        println!("    Reading characteristic value");
-        let value = char.read().await?;
-        println!("    Read value: {:x?}", &value);
-    }
-
     println!("    Starting notification session");
     {
         let notify = char.notify().await?;
@@ -107,8 +106,16 @@ async fn exercise_characteristic(
                 Ok(value) => match value {
                     Some(val) => {
                         println!("    Notification value: {:x?}", &val);
+                        let speed = match get_speed(&val) {
+                            Some(sp) => sp,
+                            None => continue,
+                        };
+
+                        println!("   Recived Speed: {} dam/hour", speed);
+                        let speed_mps_256 = ((speed * 256 * 10) / 3600);
+
                         let mut value = notify_val.lock().await;
-                        *value = val;
+                        *value = vec![0x00, speed_mps_256 as u8, (speed_mps_256 >> 8) as u8, 0x00];
                     }
                     None => break,
                 },
@@ -170,7 +177,7 @@ async fn main() -> bluer::Result<()> {
 
         // Start Advertising
         let le_advertisement = Advertisement {
-            service_uuids: vec![SERVICE_UUID].into_iter().collect(),
+            service_uuids: vec![RSC_SERVICE_UUID].into_iter().collect(),
             discoverable: Some(true),
             local_name: Some("Bridge".to_string()),
             ..Default::default()
@@ -180,11 +187,11 @@ async fn main() -> bluer::Result<()> {
         let value_notify = value.clone();
         let app = Application {
             services: vec![Service {
-                uuid: SERVICE_UUID,
+                uuid: RSC_SERVICE_UUID,
                 primary: true,
                 characteristics: vec![
                     Characteristic {
-                        uuid: FEATURE_UUID,
+                        uuid: RSC_FEATURE_UUID,
                         read: Some(CharacteristicRead {
                             read: true,
                             fun: Box::new(move |_| async move { Ok(vec![0x00, 0x00]) }.boxed()),
@@ -193,7 +200,7 @@ async fn main() -> bluer::Result<()> {
                         ..Default::default()
                     },
                     Characteristic {
-                        uuid: CHARACTERISTIC_UUID,
+                        uuid: RSC_MEASUREMENT_UUID,
                         notify: Some(CharacteristicNotify {
                             notify: true,
                             method: CharacteristicNotifyMethod::Fun(Box::new(
@@ -235,6 +242,10 @@ async fn main() -> bluer::Result<()> {
         };
 
         let app_handle = adapter.serve_gatt_application(app).await?;
+        let profile_handle = adapter.register_gatt_profile(Profile {
+            uuids: HashSet::from([FTM_SERVICE_UUID]),
+            ..Default::default()
+        });
 
         let device = search_for_device(&adapter).await?;
 
@@ -248,12 +259,18 @@ async fn main() -> bluer::Result<()> {
                 Err(_) => continue,
             }
 
-            let char = match find_rsc_characteristic(&device).await {
+            let char = match find_treadmill_data(&device).await {
                 Ok(res) => match res {
                     Some(char) => char,
-                    None => break,
+                    None => {
+                        println!("   Char Not Found");
+                        break;
+                    }
                 },
-                Err(_) => continue,
+                Err(e) => {
+                    println!("  Error: {}", e);
+                    continue;
+                }
             };
 
             match exercise_characteristic(&char, value.clone()).await {

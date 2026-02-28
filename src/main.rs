@@ -1,14 +1,27 @@
 //! Connects to our Bluetooth GATT service and exercises the characteristic.
 
-use bluer::{Adapter, AdapterEvent, Device, Result, Uuid, gatt::remote::Characteristic};
-use futures::{StreamExt, pin_mut};
-use std::time::Duration;
-use tokio::time::timeout;
+use bluer::{
+    Adapter, AdapterEvent, Device, Result, Uuid,
+    adv::Advertisement,
+    agent::Agent,
+    gatt::local::{
+        Application, Characteristic, CharacteristicNotify, CharacteristicNotifyMethod,
+        CharacteristicRead, Service,
+    },
+    gatt::remote::Characteristic as RemoteCharacteristic,
+};
+use futures::{FutureExt, StreamExt, pin_mut};
+use std::{sync::Arc, time::Duration};
+use tokio::{
+    sync::Mutex,
+    time::{sleep, timeout},
+};
 
 /// Service UUID for GATT example.
 const SERVICE_UUID: Uuid = Uuid::from_u128(0x0000181400001000800000805F9B34FB);
 
 /// Characteristic UUID for GATT example.
+const FEATURE_UUID: Uuid = Uuid::from_u128(0x00002A5400001000800000805F9B34FB);
 const CHARACTERISTIC_UUID: Uuid = Uuid::from_u128(0x00002A5300001000800000805F9B34FB);
 
 /// Manufacturer id for LE advertisement.
@@ -45,7 +58,7 @@ async fn connect_device(device: &Device) -> Result<()> {
     Ok(())
 }
 
-async fn find_rsc_characteristic(device: &Device) -> Result<Option<Characteristic>> {
+async fn find_rsc_characteristic(device: &Device) -> Result<Option<RemoteCharacteristic>> {
     println!("    Enumerating services...");
     for service in device.services().await? {
         let uuid = service.uuid().await?;
@@ -73,7 +86,10 @@ async fn find_rsc_characteristic(device: &Device) -> Result<Option<Characteristi
     Ok(None)
 }
 
-async fn exercise_characteristic(char: &Characteristic) -> Result<()> {
+async fn exercise_characteristic(
+    char: &RemoteCharacteristic,
+    notify_val: Arc<Mutex<Vec<u8>>>,
+) -> Result<()> {
     println!("    Characteristic flags: {:?}", char.flags().await?);
 
     if char.flags().await?.read {
@@ -91,6 +107,8 @@ async fn exercise_characteristic(char: &Characteristic) -> Result<()> {
                 Ok(value) => match value {
                     Some(val) => {
                         println!("    Notification value: {:x?}", &val);
+                        let mut value = notify_val.lock().await;
+                        *value = val;
                     }
                     None => break,
                 },
@@ -133,7 +151,15 @@ async fn main() -> bluer::Result<()> {
     env_logger::init();
     let session = bluer::Session::new().await?;
     let adapter = session.default_adapter().await?;
+    let agent_handle = session
+        .register_agent(Agent {
+            ..Default::default()
+        })
+        .await?;
     adapter.set_powered(true).await?;
+    adapter.set_pairable(true).await?;
+
+    let value = Arc::new(Mutex::new(vec![]));
 
     {
         println!(
@@ -141,6 +167,74 @@ async fn main() -> bluer::Result<()> {
             adapter.name(),
             adapter.address().await?
         );
+
+        // Start Advertising
+        let le_advertisement = Advertisement {
+            service_uuids: vec![SERVICE_UUID].into_iter().collect(),
+            discoverable: Some(true),
+            local_name: Some("Bridge".to_string()),
+            ..Default::default()
+        };
+
+        let adv_handle = adapter.advertise(le_advertisement).await?;
+        let value_notify = value.clone();
+        let app = Application {
+            services: vec![Service {
+                uuid: SERVICE_UUID,
+                primary: true,
+                characteristics: vec![
+                    Characteristic {
+                        uuid: FEATURE_UUID,
+                        read: Some(CharacteristicRead {
+                            read: true,
+                            fun: Box::new(move |_| async move { Ok(vec![0x00, 0x00]) }.boxed()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    Characteristic {
+                        uuid: CHARACTERISTIC_UUID,
+                        notify: Some(CharacteristicNotify {
+                            notify: true,
+                            method: CharacteristicNotifyMethod::Fun(Box::new(
+                                move |mut notifier| {
+                                    let value = value_notify.clone();
+                                    async move {
+                                        tokio::spawn(async move {
+                                            println!(
+                                                "Notification session start with confirming={:?}",
+                                                notifier.confirming()
+                                            );
+                                            loop {
+                                                {
+                                                    let value = value.lock().await;
+                                                    println!("Notifying with value {:x?}", &*value);
+                                                    if let Err(err) =
+                                                        notifier.notify(value.to_vec()).await
+                                                    {
+                                                        println!("Notification error: {}", &err);
+                                                        break;
+                                                    }
+                                                }
+                                                sleep(Duration::from_millis(500)).await;
+                                            }
+                                            println!("Notification session stop");
+                                        });
+                                    }
+                                    .boxed()
+                                },
+                            )),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let app_handle = adapter.serve_gatt_application(app).await?;
 
         let device = search_for_device(&adapter).await?;
 
@@ -162,7 +256,7 @@ async fn main() -> bluer::Result<()> {
                 Err(_) => continue,
             };
 
-            match exercise_characteristic(&char).await {
+            match exercise_characteristic(&char, value.clone()).await {
                 _ => (),
             }
         }

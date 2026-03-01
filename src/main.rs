@@ -111,7 +111,7 @@ async fn exercise_characteristic(
                         };
 
                         println!("   Recived Speed: {} dam/hour", speed);
-                        let speed_mps_256 = ((speed * 256 * 10) / 3600);
+                        let speed_mps_256 = (speed * 256 * 10) / 3600;
 
                         let mut value = notify_val.lock().await;
                         *value = vec![0x00, speed_mps_256 as u8, (speed_mps_256 >> 8) as u8, 0x00];
@@ -152,12 +152,59 @@ async fn search_for_device(adapter: &Adapter) -> Result<Device> {
     })
 }
 
+fn build_rsc_feature() -> Characteristic {
+    Characteristic {
+        uuid: RSC_FEATURE_UUID,
+        read: Some(CharacteristicRead {
+            read: true,
+            fun: Box::new(move |_| async move { Ok(vec![0x00, 0x00]) }.boxed()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn build_rsc_measurement(value_notify: Arc<Mutex<Vec<u8>>>) -> Characteristic {
+    Characteristic {
+        uuid: RSC_MEASUREMENT_UUID,
+        notify: Some(CharacteristicNotify {
+            notify: true,
+            method: CharacteristicNotifyMethod::Fun(Box::new(move |mut notifier| {
+                let value = value_notify.clone();
+                async move {
+                    tokio::spawn(async move {
+                        println!(
+                            "Notification session start with confirming={:?}",
+                            notifier.confirming()
+                        );
+                        loop {
+                            {
+                                let value = value.lock().await;
+                                println!("Notifying with value {:x?}", &*value);
+                                if let Err(err) = notifier.notify(value.to_vec()).await {
+                                    println!("Notification error: {}", &err);
+                                    break;
+                                }
+                            }
+                            sleep(Duration::from_millis(500)).await;
+                        }
+                        println!("Notification session stop");
+                    });
+                }
+                .boxed()
+            })),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> bluer::Result<()> {
     env_logger::init();
     let session = bluer::Session::new().await?;
     let adapter = session.default_adapter().await?;
-    let agent_handle = session
+    let _agent_handle = session
         .register_agent(Agent {
             ..Default::default()
         })
@@ -182,66 +229,19 @@ async fn main() -> bluer::Result<()> {
             ..Default::default()
         };
 
-        let adv_handle = adapter.advertise(le_advertisement).await?;
-        let value_notify = value.clone();
+        let _adv_handle = adapter.advertise(le_advertisement).await?;
         let app = Application {
             services: vec![Service {
                 uuid: RSC_SERVICE_UUID,
                 primary: true,
-                characteristics: vec![
-                    Characteristic {
-                        uuid: RSC_FEATURE_UUID,
-                        read: Some(CharacteristicRead {
-                            read: true,
-                            fun: Box::new(move |_| async move { Ok(vec![0x00, 0x00]) }.boxed()),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                    Characteristic {
-                        uuid: RSC_MEASUREMENT_UUID,
-                        notify: Some(CharacteristicNotify {
-                            notify: true,
-                            method: CharacteristicNotifyMethod::Fun(Box::new(
-                                move |mut notifier| {
-                                    let value = value_notify.clone();
-                                    async move {
-                                        tokio::spawn(async move {
-                                            println!(
-                                                "Notification session start with confirming={:?}",
-                                                notifier.confirming()
-                                            );
-                                            loop {
-                                                {
-                                                    let value = value.lock().await;
-                                                    println!("Notifying with value {:x?}", &*value);
-                                                    if let Err(err) =
-                                                        notifier.notify(value.to_vec()).await
-                                                    {
-                                                        println!("Notification error: {}", &err);
-                                                        break;
-                                                    }
-                                                }
-                                                sleep(Duration::from_millis(500)).await;
-                                            }
-                                            println!("Notification session stop");
-                                        });
-                                    }
-                                    .boxed()
-                                },
-                            )),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                ],
+                characteristics: vec![build_rsc_feature(), build_rsc_measurement(value.clone())],
                 ..Default::default()
             }],
             ..Default::default()
         };
 
-        let app_handle = adapter.serve_gatt_application(app).await?;
-        let profile_handle = adapter.register_gatt_profile(Profile {
+        let _app_handle = adapter.serve_gatt_application(app).await?;
+        let _profile_handle = adapter.register_gatt_profile(Profile {
             uuids: HashSet::from([FTM_SERVICE_UUID]),
             ..Default::default()
         });

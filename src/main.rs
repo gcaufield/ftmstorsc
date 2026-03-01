@@ -10,7 +10,6 @@ use bluer::{
     },
     gatt::remote::Characteristic as RemoteCharacteristic,
 };
-use byteorder::LittleEndian;
 use futures::{FutureExt, StreamExt, pin_mut};
 use std::{collections::HashSet, sync::Arc, time::Duration};
 use tokio::{

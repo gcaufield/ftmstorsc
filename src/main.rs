@@ -85,14 +85,15 @@ async fn find_treadmill_data(device: &Device) -> Result<Option<RemoteCharacteris
 }
 
 fn get_speed(data: &Vec<u8>) -> Option<u32> {
-    if (data[0] & 0x01) == 0 {
+    if (data[0] & 0x01) != 0 {
         None
     } else {
-        Some(data[1] as u32 | ((data[2] as u32) << 8))
+        Some(data[2] as u32 | ((data[3] as u32) << 8))
     }
 }
 
 async fn exercise_characteristic(
+    device: &Device,
     char: &RemoteCharacteristic,
     notify_val: Arc<Mutex<Vec<u8>>>,
 ) -> Result<()> {
@@ -119,6 +120,10 @@ async fn exercise_characteristic(
                     None => break,
                 },
                 Err(_) => {
+                    if device.is_connected().await? {
+                        println!("    Device still connected");
+                        continue;
+                    }
                     println!("    Notification session was terminated");
                     break;
                 }
@@ -186,7 +191,7 @@ fn build_rsc_measurement(value_notify: Arc<Mutex<Vec<u8>>>) -> Characteristic {
                                     break;
                                 }
                             }
-                            sleep(Duration::from_millis(500)).await;
+                            sleep(Duration::from_millis(1250)).await;
                         }
                         println!("Notification session stop");
                     });
@@ -272,7 +277,7 @@ async fn main() -> bluer::Result<()> {
                 }
             };
 
-            match exercise_characteristic(&char, value.clone()).await {
+            match exercise_characteristic(&device, &char, value.clone()).await {
                 _ => (),
             }
         }

@@ -35,6 +35,7 @@ async fn has_service(device: &Device) -> Result<bool> {
 
     return Ok(uuids.contains(&FTM_SERVICE_UUID));
 }
+
 async fn connect_device(device: &Device) -> Result<()> {
     if !device.is_connected().await? {
         println!("    Connecting...");
@@ -219,67 +220,65 @@ async fn main() -> bluer::Result<()> {
 
     let value = Arc::new(Mutex::new(vec![]));
 
-    {
-        println!(
-            "Discovering on Bluetooth adapter {} with address {}\n",
-            adapter.name(),
-            adapter.address().await?
-        );
+    println!(
+        "Discovering on Bluetooth adapter {} with address {}\n",
+        adapter.name(),
+        adapter.address().await?
+    );
 
-        // Start Advertising
-        let le_advertisement = Advertisement {
-            service_uuids: vec![RSC_SERVICE_UUID].into_iter().collect(),
-            discoverable: Some(true),
-            local_name: Some("Bridge".to_string()),
+    // Start Advertising
+    let le_advertisement = Advertisement {
+        service_uuids: vec![RSC_SERVICE_UUID].into_iter().collect(),
+        discoverable: Some(true),
+        local_name: Some("Bridge".to_string()),
+        ..Default::default()
+    };
+
+    let _adv_handle = adapter.advertise(le_advertisement).await?;
+    let app = Application {
+        services: vec![Service {
+            uuid: RSC_SERVICE_UUID,
+            primary: true,
+            characteristics: vec![build_rsc_feature(), build_rsc_measurement(value.clone())],
             ..Default::default()
-        };
+        }],
+        ..Default::default()
+    };
 
-        let _adv_handle = adapter.advertise(le_advertisement).await?;
-        let app = Application {
-            services: vec![Service {
-                uuid: RSC_SERVICE_UUID,
-                primary: true,
-                characteristics: vec![build_rsc_feature(), build_rsc_measurement(value.clone())],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
+    let _app_handle = adapter.serve_gatt_application(app).await?;
+    let _profile_handle = adapter.register_gatt_profile(Profile {
+        uuids: HashSet::from([FTM_SERVICE_UUID]),
+        ..Default::default()
+    });
 
-        let _app_handle = adapter.serve_gatt_application(app).await?;
-        let _profile_handle = adapter.register_gatt_profile(Profile {
-            uuids: HashSet::from([FTM_SERVICE_UUID]),
-            ..Default::default()
-        });
+    let device = search_for_device(&adapter).await?;
 
-        let device = search_for_device(&adapter).await?;
+    loop {
+        if device.is_connected().await? {
+            device.disconnect().await?;
+        }
 
-        loop {
-            if device.is_connected().await? {
-                device.disconnect().await?;
-            }
+        match connect_device(&device).await {
+            Ok(()) => (),
+            Err(_) => continue,
+        }
 
-            match connect_device(&device).await {
-                Ok(()) => (),
-                Err(_) => continue,
-            }
-
-            let char = match find_treadmill_data(&device).await {
-                Ok(res) => match res {
-                    Some(char) => char,
-                    None => {
-                        println!("   Char Not Found");
-                        break;
-                    }
-                },
-                Err(e) => {
-                    println!("  Error: {}", e);
-                    continue;
+        let char = match find_treadmill_data(&device).await {
+            Ok(res) => match res {
+                Some(char) => char,
+                None => {
+                    println!("   Char Not Found");
+                    break;
                 }
-            };
-
-            match exercise_characteristic(&device, &char, value.clone()).await {
-                _ => (),
+            },
+            Err(e) => {
+                println!("  Error: {}", e);
+                continue;
             }
+        };
+
+        match exercise_characteristic(&device, &char, value.clone()).await {
+            _ => (),
         }
     }
 

@@ -6,12 +6,12 @@ use bluer::{
     agent::Agent,
     gatt::local::{
         Application, Characteristic, CharacteristicNotify, CharacteristicNotifyMethod,
-        CharacteristicRead, Profile, Service,
+        CharacteristicRead, Service,
     },
     gatt::remote::Characteristic as RemoteCharacteristic,
 };
 use futures::{FutureExt, StreamExt, pin_mut};
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tokio::{
     sync::Mutex,
     time::{sleep, timeout},
@@ -246,10 +246,6 @@ async fn main() -> bluer::Result<()> {
     };
 
     let _app_handle = adapter.serve_gatt_application(app).await?;
-    let _profile_handle = adapter.register_gatt_profile(Profile {
-        uuids: HashSet::from([FTM_SERVICE_UUID]),
-        ..Default::default()
-    });
 
     let device = search_for_device(&adapter).await?;
 

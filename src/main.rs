@@ -218,7 +218,7 @@ async fn main() -> bluer::Result<()> {
     adapter.set_powered(true).await?;
     adapter.set_pairable(true).await?;
 
-    let value = Arc::new(Mutex::new(vec![]));
+    let value = Arc::new(Mutex::new(vec![0x00, 0x00, 0x00, 0x00]));
 
     println!(
         "Discovering on Bluetooth adapter {} with address {}\n",

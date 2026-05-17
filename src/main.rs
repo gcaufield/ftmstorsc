@@ -19,8 +19,6 @@ async fn main() -> bluer::Result<()> {
     adapter.set_powered(true).await?;
     adapter.set_pairable(true).await?;
 
-    let value = Arc::new(Mutex::new(vec![0x00, 0x00, 0x00, 0x00]));
-
     println!(
         "Discovering on Bluetooth adapter {} with address {}\n",
         adapter.name(),
@@ -28,9 +26,8 @@ async fn main() -> bluer::Result<()> {
     );
 
     // Start Advertising
-    let _adv_handle = ble::start_advertising(&adapter).await?;
-    let _app_handle = ble::serve_rsc(&adapter, value.clone()).await?;
-    let device = ble::search_for_device(&adapter).await?;
+    let driver = ble::Driver::new(adapter).await?;
+    let device = driver.search_for_device().await?;
 
     loop {
         if device.is_connected().await? {
@@ -56,7 +53,7 @@ async fn main() -> bluer::Result<()> {
             }
         };
 
-        match ble::exercise_characteristic(&device, &char, value.clone()).await {
+        match ble::exercise_characteristic(&device, &char, driver.current_speed.clone()).await {
             _ => (),
         }
     }

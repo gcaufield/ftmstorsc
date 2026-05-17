@@ -25,7 +25,50 @@ const RSC_FEATURE_UUID: Uuid = Uuid::from_u128(0x00002A5400001000800000805F9B34F
 const RSC_MEASUREMENT_UUID: Uuid = Uuid::from_u128(0x00002A5300001000800000805F9B34FB);
 const TREADMILL_DATA_UUID: Uuid = Uuid::from_u128(0x00002ACD00001000800000805F9B34FB);
 
-pub async fn start_advertising(adapter: &Adapter) -> Result<AdvertisementHandle> {
+pub struct Driver {
+    pub current_speed: Arc<Mutex<u32>>,
+    _adapter: Adapter,
+    _adv_handle: AdvertisementHandle,
+    _app_handle: ApplicationHandle,
+}
+
+impl Driver {
+    pub async fn new(adapter: Adapter) -> Result<Driver> {
+        let speed = Arc::new(Mutex::new(0u32));
+        let adv_handle = start_advertising(&adapter).await?;
+        let app_handle = serve_rsc(&adapter, speed.clone()).await?;
+        Ok(Driver {
+            current_speed: speed.clone(),
+            _adapter: adapter,
+            _adv_handle: adv_handle,
+            _app_handle: app_handle,
+        })
+    }
+
+    pub async fn search_for_device(&self) -> Result<Device> {
+        let discover = self._adapter.discover_devices().await?;
+        pin_mut!(discover);
+        while let Some(evt) = discover.next().await {
+            match evt {
+                AdapterEvent::DeviceAdded(addr) => {
+                    let device = self._adapter.device(addr)?;
+                    if has_ftms(&device).await? {
+                        println!("    Device provides our service!");
+                        return Ok(device);
+                    }
+                }
+                _ => (),
+            }
+        }
+
+        Err(bluer::Error {
+            kind: bluer::ErrorKind::NotAvailable,
+            message: String::new(),
+        })
+    }
+}
+
+async fn start_advertising(adapter: &Adapter) -> Result<AdvertisementHandle> {
     let le_advertisement = Advertisement {
         service_uuids: vec![RSC_SERVICE_UUID].into_iter().collect(),
         discoverable: Some(true),
@@ -36,40 +79,18 @@ pub async fn start_advertising(adapter: &Adapter) -> Result<AdvertisementHandle>
     return adapter.advertise(le_advertisement).await;
 }
 
-pub async fn serve_rsc(adapter: &Adapter, value: Arc<Mutex<Vec<u8>>>) -> Result<ApplicationHandle> {
+async fn serve_rsc(adapter: &Adapter, value: Arc<Mutex<u32>>) -> Result<ApplicationHandle> {
     let app = Application {
         services: vec![Service {
             uuid: RSC_SERVICE_UUID,
             primary: true,
-            characteristics: vec![build_rsc_feature(), build_rsc_measurement(value.clone())],
+            characteristics: vec![build_rsc_feature(), build_rsc_measurement(value)],
             ..Default::default()
         }],
         ..Default::default()
     };
 
     return adapter.serve_gatt_application(app).await;
-}
-
-pub async fn search_for_device(adapter: &Adapter) -> Result<Device> {
-    let discover = adapter.discover_devices().await?;
-    pin_mut!(discover);
-    while let Some(evt) = discover.next().await {
-        match evt {
-            AdapterEvent::DeviceAdded(addr) => {
-                let device = adapter.device(addr)?;
-                if has_ftms(&device).await? {
-                    println!("    Device provides our service!");
-                    return Ok(device);
-                }
-            }
-            _ => (),
-        }
-    }
-
-    Err(bluer::Error {
-        kind: bluer::ErrorKind::NotAvailable,
-        message: String::new(),
-    })
 }
 
 async fn has_ftms(device: &Device) -> Result<bool> {
@@ -142,7 +163,7 @@ fn get_speed(data: &Vec<u8>) -> Option<u32> {
 pub async fn exercise_characteristic(
     device: &Device,
     char: &RemoteCharacteristic,
-    notify_val: Arc<Mutex<Vec<u8>>>,
+    speed: Arc<Mutex<u32>>,
 ) -> Result<()> {
     println!("    Starting notification session");
     {
@@ -153,16 +174,15 @@ pub async fn exercise_characteristic(
                 Ok(value) => match value {
                     Some(val) => {
                         println!("    Notification value: {:x?}", &val);
-                        let speed = match get_speed(&val) {
+                        let ntf_speed = match get_speed(&val) {
                             Some(sp) => sp,
                             None => continue,
                         };
 
-                        println!("   Recived Speed: {} dam/hour", speed);
-                        let speed_mps_256 = (speed * 256 * 10) / 3600;
+                        println!("   Recived Speed: {} dam/hour", ntf_speed);
 
-                        let mut value = notify_val.lock().await;
-                        *value = vec![0x00, speed_mps_256 as u8, (speed_mps_256 >> 8) as u8, 0x00];
+                        let mut speed_mps_256 = speed.lock().await;
+                        *speed_mps_256 = (ntf_speed * 256 * 10) / 3600;
                     }
                     None => break,
                 },
@@ -195,10 +215,9 @@ fn build_rsc_feature() -> Characteristic {
 }
 
 fn process_notify(
-    value_notify: Arc<Mutex<Vec<u8>>>,
+    value_notify: Arc<Mutex<u32>>,
     mut notifier: CharacteristicNotifier,
 ) -> impl Future<Output = ()> {
-    let value = value_notify.clone();
     async move {
         tokio::spawn(async move {
             println!(
@@ -207,9 +226,12 @@ fn process_notify(
             );
             loop {
                 {
-                    let value = value.lock().await;
-                    println!("Notifying with value {:x?}", &*value);
-                    if let Err(err) = notifier.notify(value.to_vec()).await {
+                    let speed_mps_256 = *value_notify.lock().await;
+
+                    // Encode notification
+                    let ntfy = vec![0x00, speed_mps_256 as u8, (speed_mps_256 >> 8) as u8, 0x00];
+                    println!("Notifying with value {:x?}", &speed_mps_256);
+                    if let Err(err) = notifier.notify(ntfy.to_vec()).await {
                         println!("Notification error: {}", &err);
                         break;
                     }
@@ -221,7 +243,7 @@ fn process_notify(
     }
 }
 
-fn build_rsc_measurement(value_notify: Arc<Mutex<Vec<u8>>>) -> Characteristic {
+fn build_rsc_measurement(value_notify: Arc<Mutex<u32>>) -> Characteristic {
     Characteristic {
         uuid: RSC_MEASUREMENT_UUID,
         notify: Some(CharacteristicNotify {

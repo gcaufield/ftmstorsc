@@ -4,11 +4,13 @@ use bluer::{
     Adapter, AdapterEvent, Device, Result, Uuid,
     adv::Advertisement,
     agent::Agent,
-    gatt::local::{
-        Application, Characteristic, CharacteristicNotify, CharacteristicNotifyMethod,
-        CharacteristicRead, Service,
+    gatt::{
+        local::{
+            Application, Characteristic, CharacteristicNotifier, CharacteristicNotify,
+            CharacteristicNotifyMethod, CharacteristicRead, Service,
+        },
+        remote::Characteristic as RemoteCharacteristic,
     },
-    gatt::remote::Characteristic as RemoteCharacteristic,
 };
 use futures::{FutureExt, StreamExt, pin_mut};
 use std::{sync::Arc, time::Duration};
@@ -170,34 +172,40 @@ fn build_rsc_feature() -> Characteristic {
     }
 }
 
+fn process_notify(
+    value_notify: Arc<Mutex<Vec<u8>>>,
+    mut notifier: CharacteristicNotifier,
+) -> impl Future<Output = ()> {
+    let value = value_notify.clone();
+    async move {
+        tokio::spawn(async move {
+            println!(
+                "Notification session start with confirming={:?}",
+                notifier.confirming()
+            );
+            loop {
+                {
+                    let value = value.lock().await;
+                    println!("Notifying with value {:x?}", &*value);
+                    if let Err(err) = notifier.notify(value.to_vec()).await {
+                        println!("Notification error: {}", &err);
+                        break;
+                    }
+                }
+                sleep(Duration::from_millis(1250)).await;
+            }
+            println!("Notification session stop");
+        });
+    }
+}
+
 fn build_rsc_measurement(value_notify: Arc<Mutex<Vec<u8>>>) -> Characteristic {
     Characteristic {
         uuid: RSC_MEASUREMENT_UUID,
         notify: Some(CharacteristicNotify {
             notify: true,
-            method: CharacteristicNotifyMethod::Fun(Box::new(move |mut notifier| {
-                let value = value_notify.clone();
-                async move {
-                    tokio::spawn(async move {
-                        println!(
-                            "Notification session start with confirming={:?}",
-                            notifier.confirming()
-                        );
-                        loop {
-                            {
-                                let value = value.lock().await;
-                                println!("Notifying with value {:x?}", &*value);
-                                if let Err(err) = notifier.notify(value.to_vec()).await {
-                                    println!("Notification error: {}", &err);
-                                    break;
-                                }
-                            }
-                            sleep(Duration::from_millis(1250)).await;
-                        }
-                        println!("Notification session stop");
-                    });
-                }
-                .boxed()
+            method: CharacteristicNotifyMethod::Fun(Box::new(move |notifier| {
+                process_notify(value_notify.clone(), notifier).boxed()
             })),
             ..Default::default()
         }),

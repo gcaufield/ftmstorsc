@@ -49,15 +49,12 @@ impl Driver {
         let discover = self._adapter.discover_devices().await?;
         pin_mut!(discover);
         while let Some(evt) = discover.next().await {
-            match evt {
-                AdapterEvent::DeviceAdded(addr) => {
-                    let device = self._adapter.device(addr)?;
-                    if has_ftms(&device).await? {
-                        println!("    Device provides our service!");
-                        return Ok(device);
-                    }
+            if let AdapterEvent::DeviceAdded(addr) = evt {
+                let device = self._adapter.device(addr)?;
+                if has_ftms(&device).await? {
+                    println!("    Device provides our service!");
+                    return Ok(device);
                 }
-                _ => (),
             }
         }
 
@@ -100,7 +97,7 @@ async fn has_ftms(device: &Device) -> Result<bool> {
     let md = device.manufacturer_data().await?;
     println!("    Manufacturer data: {:x?}", &md);
 
-    return Ok(uuids.contains(&FTM_SERVICE_UUID));
+    Ok(uuids.contains(&FTM_SERVICE_UUID))
 }
 
 pub async fn connect_device(device: &Device) -> Result<()> {
@@ -152,7 +149,7 @@ pub async fn find_treadmill_data(device: &Device) -> Result<Option<RemoteCharact
     Ok(None)
 }
 
-fn get_speed(data: &Vec<u8>) -> Option<u32> {
+fn get_speed(data: &[u8]) -> Option<u32> {
     if (data[0] & 0x01) != 0 {
         None
     } else {
@@ -214,33 +211,28 @@ fn build_rsc_feature() -> Characteristic {
     }
 }
 
-fn process_notify(
-    value_notify: Arc<Mutex<u32>>,
-    mut notifier: CharacteristicNotifier,
-) -> impl Future<Output = ()> {
-    async move {
-        tokio::spawn(async move {
-            println!(
-                "Notification session start with confirming={:?}",
-                notifier.confirming()
-            );
-            loop {
-                {
-                    let speed_mps_256 = *value_notify.lock().await;
+async fn process_notify(value_notify: Arc<Mutex<u32>>, mut notifier: CharacteristicNotifier) {
+    tokio::spawn(async move {
+        println!(
+            "Notification session start with confirming={:?}",
+            notifier.confirming()
+        );
+        loop {
+            {
+                let speed_mps_256 = *value_notify.lock().await;
 
-                    // Encode notification
-                    let ntfy = vec![0x00, speed_mps_256 as u8, (speed_mps_256 >> 8) as u8, 0x00];
-                    println!("Notifying with value {:x?}", &speed_mps_256);
-                    if let Err(err) = notifier.notify(ntfy.to_vec()).await {
-                        println!("Notification error: {}", &err);
-                        break;
-                    }
+                // Encode notification
+                let ntfy = [0x00, speed_mps_256 as u8, (speed_mps_256 >> 8) as u8, 0x00];
+                println!("Notifying with value {:x?}", &speed_mps_256);
+                if let Err(err) = notifier.notify(ntfy.to_vec()).await {
+                    println!("Notification error: {}", &err);
+                    break;
                 }
-                sleep(Duration::from_millis(1250)).await;
             }
-            println!("Notification session stop");
-        });
-    }
+            sleep(Duration::from_millis(1250)).await;
+        }
+        println!("Notification session stop");
+    });
 }
 
 fn build_rsc_measurement(value_notify: Arc<Mutex<u32>>) -> Characteristic {

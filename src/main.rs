@@ -3,8 +3,6 @@
 mod ble;
 
 use bluer::agent::Agent;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> bluer::Result<()> {
@@ -53,9 +51,8 @@ async fn main() -> bluer::Result<()> {
             }
         };
 
-        match ble::exercise_characteristic(&device, &char, driver.current_speed.clone()).await {
-            _ => (),
-        }
+        // Ignore the return
+        _ = ble::exercise_characteristic(&device, &char, driver.current_speed.clone()).await;
     }
 
     Ok(())
